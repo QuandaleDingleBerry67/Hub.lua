@@ -25,6 +25,13 @@ local Camera = Workspace.CurrentCamera
 getgenv().meow_flags = getgenv().meow_flags or {}
 local flags = getgenv().meow_flags
 
+-- Reset stale position-desync state from previous executions.
+flags.fake_position_enabled = false
+getgenv().FakePositionEnabled = false
+getgenv().HideUndergroundEnabled = false
+getgenv().position_desync_source = nil
+getgenv().v2_tp_pos = nil
+
 -- Screenshot Ragebot Methods
 flags.ragebot                   = false
 flags.ragebot_enabled           = false
@@ -287,7 +294,13 @@ getgenv().set_position_desync = set_position_desync
 getgenv().clear_position_desync = clear_position_desync
 
 local function setFakePosition(state)
-    if fakePos.Enabled == state then return end
+    state = (state == true)
+    if fakePos.Enabled == state then
+        flags.fake_position_enabled = state
+        getgenv().FakePositionEnabled = state
+        getgenv().HideUndergroundEnabled = state
+        return
+    end
     fakePos.Enabled = state
     flags.fake_position_enabled = state
     getgenv().FakePositionEnabled = state
@@ -785,7 +798,7 @@ manip_probe = function(origin, dir, model, part)
 end
 manip_resolve = function() return true end
 manip_in_control = function() return flags.manip_result == true end
-manip_is_underground = function() return hideUndergroundEnabled end
+manip_is_underground = function() return fakePos.Enabled == true end
 
 collect_drops = function(char, root)
     if not flags.ACO then return end
@@ -3850,42 +3863,75 @@ do
 
         function library:get_config()
             local Config = {}
-            
-            for _, v in next, flags do
-                if type(v) == "table" and v.key then
-                    Config[_] = {active = v.active, mode = v.mode, key = tostring(v.key)}
-                elseif type(v) == "table" and v["Transparency"] and v["Color"] then
-                    Config[_] = {Transparency = v["Transparency"], Color = v["Color"]:ToHex()}
+
+            for name, value in pairs(library.flags) do
+                if type(value) == "table" and value.key ~= nil then
+                    Config[name] = {
+                        active = value.active == true,
+                        mode = value.mode or "Toggle",
+                        key = tostring(value.key)
+                    }
+                elseif type(value) == "table" and value.Transparency ~= nil and value.Color ~= nil then
+                    local colorHex = value.Color
+                    if typeof(colorHex) == "Color3" then
+                        colorHex = colorHex:ToHex()
+                    end
+                    Config[name] = {
+                        Transparency = value.Transparency,
+                        Color = colorHex
+                    }
                 else
-                    Config[_] = v
+                    Config[name] = value
                 end
-            end 
-            
+            end
+
             return http_service:JSONEncode(Config)
         end
 
-        function library:load_config(config_json) 
-            local config = http_service:JSONDecode(config_json)
-            
-            for _, v in config do 
-                local function_set = library.config_flags[_]
-                
-                if _ == "config_name_list" then 
-                    continue 
-                end
+        function library:load_config(config_json)
+            if type(config_json) ~= "string" or config_json == "" then
+                return false, "Config data is empty or invalid"
+            end
 
-                if function_set then 
-                    if type(v) == "table" and v["Transparency"] and v["Color"] then
-                        function_set(hex(v["Color"]), v["Transparency"])
-                    elseif type(v) == "table" and v["active"] then 
-                        function_set(v)
+            local decodeOk, config = pcall(function()
+                return http_service:JSONDecode(config_json)
+            end)
+            if not decodeOk or type(config) ~= "table" then
+                return false, "Config JSON could not be decoded"
+            end
+
+            local loaded, skipped = 0, 0
+            for name, value in pairs(config) do
+                if name ~= "config_name_list" then
+                    local setter = library.config_flags[name]
+                    if type(setter) == "function" then
+                        local applyOk = pcall(function()
+                            if type(value) == "table"
+                                and value.Transparency ~= nil
+                                and value.Color ~= nil then
+                                local color = value.Color
+                                if type(color) == "string" then
+                                    color = hex(color)
+                                end
+                                setter(color, value.Transparency)
+                            else
+                                setter(value)
+                            end
+                        end)
+                        if applyOk then
+                            loaded = loaded + 1
+                        else
+                            skipped = skipped + 1
+                        end
                     else
-                        function_set(v)
+                        skipped = skipped + 1
                     end
-                end 
-            end 
-        end 
-        
+                end
+            end
+
+            return true, loaded, skipped
+        end
+
         function library:round(number, float) 
             local multiplier = 1 / (float or 1)
 
@@ -10016,71 +10062,121 @@ do
         end
     })
 
+    local function getSafeConfigName()
+        local cname = flags.config_custom_name
+        if type(cname) ~= "string" or cname:gsub("%s+", "") == "" then
+            cname = flags.selected_config_name
+        end
+        if type(cname) ~= "string" or cname:gsub("%s+", "") == "" then
+            cname = "default"
+        end
+        cname = cname:gsub("[^%w_%-]", "_"):sub(1, 48)
+        if cname == "" then cname = "default" end
+        return cname
+    end
+
+    local function ensureConfigFolder()
+        if not isfolder("sleepy") then makefolder("sleepy") end
+        if not isfolder("sleepy/configs") then makefolder("sleepy/configs") end
+    end
+
     secConfigActions:button({
         name = "Save Config",
         callback = function()
-            local cname = flags.config_custom_name
-            if not cname or #cname == 0 then cname = flags.selected_config_name end
-            if not cname or #cname == 0 then cname = "default" end
-            pcall(function()
-                if not isfolder("sleepy") then makefolder("sleepy") end
-                if not isfolder("sleepy/configs") then makefolder("sleepy/configs") end
-                local data = Library:get_config()
-                writefile("sleepy/configs/" .. cname .. ".cfg", data)
+            local cname = getSafeConfigName()
+            local ok, err = pcall(function()
+                ensureConfigFolder()
+                writefile("sleepy/configs/" .. cname .. ".cfg", Library:get_config())
+                flags.selected_config_name = cname
                 refreshConfigs()
-                if Library.notifications then
-                    Library.notifications:create_notification({
-                        name = "Configs",
-                        info = "Saved config: " .. cname,
-                        lifetime = 3
-                    })
-                end
             end)
+            if Library.notifications then
+                Library.notifications:create_notification({
+                    name = "Configs",
+                    info = ok and ("Saved config: " .. cname) or ("Save failed: " .. tostring(err)),
+                    lifetime = 4
+                })
+            end
         end
     })
 
     secConfigActions:button({
         name = "Load Config",
         callback = function()
-            local cname = flags.selected_config_name or flags.config_custom_name or "default"
-            pcall(function()
-                local path = "sleepy/configs/" .. cname .. ".cfg"
-                if isfile and isfile(path) then
-                    local data = readfile(path)
-                    Library:load_config(data)
-                    if Library.notifications then
-                        Library.notifications:create_notification({
-                            name = "Configs",
-                            info = "Loaded config: " .. cname,
-                            lifetime = 3
-                        })
-                    end
-                else
-                    warn("[Sleepy Hub] Config file not found: " .. path)
+            local cname = getSafeConfigName()
+            local path = "sleepy/configs/" .. cname .. ".cfg"
+            local ok, result, loaded, skipped = pcall(function()
+                if not isfile or not isfile(path) then
+                    error("Config file not found: " .. path)
                 end
+                return Library:load_config(readfile(path))
             end)
+
+            local message
+            if ok and result == true then
+                message = string.format("Loaded %s (%d applied, %d skipped)", cname, loaded or 0, skipped or 0)
+                flags.selected_config_name = cname
+            else
+                message = "Load failed: " .. tostring(ok and loaded or result)
+            end
+            if Library.notifications then
+                Library.notifications:create_notification({
+                    name = "Configs",
+                    info = message,
+                    lifetime = 5
+                })
+            end
+            if not ok or result ~= true then
+                warn("[Sleepy Hub] " .. message)
+            end
         end
     })
 
     secConfigActions:button({
         name = "Delete Config",
         callback = function()
-            local cname = flags.selected_config_name
-            if not cname or #cname == 0 or cname == "default" then return end
-            pcall(function()
-                local path = "sleepy/configs/" .. cname .. ".cfg"
+            local cname = getSafeConfigName()
+            local path = "sleepy/configs/" .. cname .. ".cfg"
+            local ok, err = pcall(function()
                 if isfile and isfile(path) then
                     delfile(path)
-                    refreshConfigs()
-                    if Library.notifications then
-                        Library.notifications:create_notification({
-                            name = "Configs",
-                            info = "Deleted config: " .. cname,
-                            lifetime = 3
-                        })
+                else
+                    error("Config file not found")
+                end
+                refreshConfigs()
+            end)
+            if Library.notifications then
+                Library.notifications:create_notification({
+                    name = "Configs",
+                    info = ok and ("Deleted config: " .. cname) or ("Delete failed: " .. tostring(err)),
+                    lifetime = 4
+                })
+            end
+        end
+    })
+
+    secConfigActions:button({
+        name = "Delete ALL Configs",
+        callback = function()
+            local ok, err = pcall(function()
+                ensureConfigFolder()
+                for _, filePath in ipairs(listfiles("sleepy/configs")) do
+                    local path = tostring(filePath)
+                    if path:lower():match("%.cfg$") or path:lower():match("%.json$") then
+                        delfile(path)
                     end
                 end
+                flags.selected_config_name = nil
+                flags.config_custom_name = nil
+                refreshConfigs()
             end)
+            if Library.notifications then
+                Library.notifications:create_notification({
+                    name = "Configs",
+                    info = ok and "All saved config files deleted" or ("Delete failed: " .. tostring(err)),
+                    lifetime = 4
+                })
+            end
         end
     })
 
@@ -10140,7 +10236,8 @@ do
 
     secTheme:keybind({
         name = "Menu Toggle Keybind",
-        default = Enum.KeyCode.RightShift,
+        key = Enum.KeyCode.LeftAlt,
+        default = false,
         mode = "Toggle",
         callback = function(state)
             if window and window.toggle_menu then
