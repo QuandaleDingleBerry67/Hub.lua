@@ -1878,6 +1878,13 @@ local function restoreWeaponVisuals()
 end
 
 local function updateWeaponVisuals()
+    local weaponVisualsEnabled = flags.item_wireframe == true
+        or flags.arm_appearance == true
+        or flags.item_chams == true
+        or next(meowState.SavedPartProps) ~= nil
+    if not weaponVisualsEnabled then
+        return
+    end
 
     local wfCol1 = resolveColor3(flags.wireframe_color, Color3.fromRGB(255, 255, 255))
     local wfCol2 = resolveColor3(flags.wireframe_color2, Color3.fromRGB(0, 162, 255))
@@ -10334,14 +10341,34 @@ Library:init_config(window)
 
 initProceduralDrawings()
 
+local lastTargetVisualRefresh = 0
 local stepConn = RunService.Heartbeat:Connect(function()
     if meowState.Destroyed then return end
     Camera = Workspace.CurrentCamera or Camera
-    pcall(get_target)
+
+    -- Target HUD/highlight refresh is optional and throttled to 10 Hz.
+    local targetVisualsEnabled = flags.target_hud == true
+        or flags.target_hud_preview == true
+        or flags.target_highlight == true
+    if targetVisualsEnabled then
+        local now = os.clock()
+        if now - lastTargetVisualRefresh >= 0.1 then
+            lastTargetVisualRefresh = now
+            pcall(get_target)
+            pcall(updateTargetVisuals)
+        end
+    elseif meowState.TargetHudFrame then
+        meowState.TargetHudFrame.Visible = false
+        pcall(function()
+            if meowState.TargetHighlight then
+                meowState.TargetHighlight.Enabled = false
+            end
+        end)
+    end
+
     pcall(runCombatAimbot)
     pcall(function() runRagebotCombat(0) end)
     pcall(runMeleeAura)
-    pcall(updateTargetVisuals)
     pcall(updateWeaponVisuals)
     pcall(runAutoLoadout)
     pcall(runAutoQueue)
@@ -10364,34 +10391,7 @@ local renderConn = RunService.RenderStepped:Connect(function(dt)
 end)
 table.insert(_meowConnections, renderConn)
 
-task.spawn(function()
-    task.wait(0.2)
-    pcall(function()
-        if Library and Library.items then
-            for _, v in ipairs(Library.items:GetDescendants()) do
-                if v:IsA("TextButton") then
-                    local label = v:FindFirstChildOfClass("TextLabel")
-                    if label and label.Text == "main" then
-                        if getconnections then
-                            for _, conn in ipairs(getconnections(v.MouseButton1Down)) do
-                                pcall(function()
-                                    local fn = conn.Function
-                                    if fn and debug and debug.getupvalues then
-                                        for _, u in pairs(debug.getupvalues(fn)) do
-                                            if type(u) == "table" and u.open_tab then
-                                                u.open_tab()
-                                            end
-                                        end
-                                    end
-                                end)
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end)
-end)
+-- Removed startup UI introspection scan; it was not required for loading.
 
 Library.notifications:create_notification({
     name     = "Sleepy.gg 🎃",
